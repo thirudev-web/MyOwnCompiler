@@ -1,85 +1,57 @@
-version: '3.8'
+# Build the image first:  docker build -t compiler:latest .
+# Put COMPILER_API_KEY in .env (see .env.example), then:  docker compose up -d
+
+# Settings shared by all 10 compiler containers
+x-compiler: &compiler
+  image: compiler:latest
+  restart: unless-stopped
+  init: true                      # tiny init as PID 1 cleans up dead (zombie) processes from fork bombs
+  read_only: true                 # nothing on disk can be changed...
+  tmpfs:
+    - /tmp:size=64m,mode=0711,exec,nosuid,nodev  # ...except a small in-memory /tmp (exec: compiled C programs run from here)
+  cap_drop: [ALL]
+  cap_add: [SETUID, SETGID, KILL] # only what's needed to run code as `runner` and kill it
+  security_opt:
+    - no-new-privileges:true
+  mem_limit: 768m
+  memswap_limit: 768m
+  cpus: 1.0
+  pids_limit: 256
+  networks:
+    - code_network                # internal only: no internet access
 
 services:
   nginx:
-    image: nginx:latest
+    image: nginx:1.27
     container_name: nginx_loadbalancer
+    restart: unless-stopped
     ports:
-      - "5000:9000"
+      - "${COMPILER_PORT:-5000}:9000"   # set COMPILER_PORT in .env to change it
+    environment:
+      # Fails fast if the key is missing so nginx never runs without one
+      COMPILER_API_KEY: ${COMPILER_API_KEY:?Set COMPILER_API_KEY in .env (see .env.example)}
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
     volumes:
-      - ./conf/nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - c1
-      - c2
-      - c3
-      - c4
-      - c5
-      - c6
-      - c7
-      - c8
-      - c9
-      - c10
+      - ./conf/nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
+    depends_on: [c1, c2, c3, c4, c5, c6, c7, c8, c9, c10]
     networks:
       - code_network
-  
-  # Build this repository first using: docker build -t compiler:latest .
-  c1:
-    image: compiler:latest
-    container_name: c1
-    networks:
-      - code_network
+      - public
 
-  c2:
-    image: compiler:latest
-    container_name: c2
-    networks:
-      - code_network
-
-  c3:
-    image: compiler:latest
-    container_name: c3
-    networks:
-      - code_network
-
-  c4:
-    image: compiler:latest
-    container_name: c4
-    networks:
-      - code_network
-
-  c5:
-    image: compiler:latest
-    container_name: c5
-    networks:
-      - code_network
-  c6:
-    image: compiler:latest
-    container_name: c6
-    networks:
-      - code_network
-  c7:
-    image: compiler:latest
-    container_name: c7
-    networks:
-      - code_network
-  
-  c8:
-    image: compiler:latest
-    container_name: c8
-    networks:
-      - code_network
-  
-  c9:
-    image: compiler:latest
-    container_name: c9
-    networks:
-      - code_network
-  c10:
-    image: compiler:latest
-    container_name: c10
-    networks:
-      - code_network
+  c1: { <<: *compiler, container_name: c1 }
+  c2: { <<: *compiler, container_name: c2 }
+  c3: { <<: *compiler, container_name: c3 }
+  c4: { <<: *compiler, container_name: c4 }
+  c5: { <<: *compiler, container_name: c5 }
+  c6: { <<: *compiler, container_name: c6 }
+  c7: { <<: *compiler, container_name: c7 }
+  c8: { <<: *compiler, container_name: c8 }
+  c9: { <<: *compiler, container_name: c9 }
+  c10: { <<: *compiler, container_name: c10 }
 
 networks:
   code_network:
     driver: bridge
+    internal: true   # containers on this network can't reach the internet
+  public:
+    driver: bridge   # only nginx is on this one, so the port can be published

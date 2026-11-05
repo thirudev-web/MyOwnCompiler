@@ -1,0 +1,73 @@
+# Template: on startup the nginx image replaces ${COMPILER_API_KEY} with the value
+# from the environment and writes the result to /etc/nginx/nginx.conf.
+worker_processes  1;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+
+    sendfile        on;
+    keepalive_timeout  65;
+    server_tokens   off;
+
+    # =========================
+    # Load Balancer for Node.js
+    # =========================
+    upstream code_servers {
+        least_conn;   # send each job to the least busy container
+        server c1:3000;
+        server c2:3000;
+        server c3:3000;
+        server c4:3000;
+        server c5:3000;
+        server c6:3000;
+        server c7:3000;
+        server c8:3000;
+        server c9:3000;
+        server c10:3000;
+        keepalive 16;
+    }
+
+    server {
+        listen 9000;
+        server_name localhost;
+
+        client_max_body_size 10m;
+
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Long test-case runs can take a while
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+
+        # Code submission: requires the API key
+        location ~ ^/submit-(c|python)$ {
+            if ($http_x_api_key != "${COMPILER_API_KEY}") {
+                return 401;
+            }
+            proxy_pass http://code_servers;
+        }
+
+        # Health checks: open
+        location = / {
+            proxy_pass http://code_servers;
+        }
+        location = /compiler {
+            proxy_pass http://code_servers;
+        }
+
+        # Everything else
+        location / {
+            return 404;
+        }
+    }
+}
