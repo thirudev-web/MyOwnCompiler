@@ -1,347 +1,216 @@
 # MyOwnCompiler
 
-A secure, scalable C compiler service built with Node.js that provides a REST API for compiling and executing C code with test case validation.
+A code-execution API for online coding contests. It compiles and runs **C** and **Python** code against test cases and reports which ones passed. Student code runs inside locked-down Docker containers, and nginx sits in front as the only entry point.
 
-## 🚀 Features
-
-- **Secure Code Execution**: Built-in security measures to prevent malicious code execution
-- **Test Case Validation**: Submit C code with multiple test cases for automated validation
-- **Load Balanced Architecture**: Nginx load balancing across 10 Docker containers for high availability
-- **Compilation Safety**: Comprehensive error handling and timeout protection
-- **Cross-Platform Support**: Dockerized environment ensures consistent behavior across platforms
-- **RESTful API**: Simple HTTP API for easy integration with frontend applications
-
-## 🏗️ Architecture
-
-The service consists of several key components:
+## Architecture
 
 ```
-┌─────────────────┐    ┌──────────────┐    ┌─────────────────────┐
-│   Client App    │────│    nginx     │────│  Node.js Containers │
-│   (Frontend)    │    │ Load Balancer│    │     (c1 - c10)      │
-└─────────────────┘    └──────────────┘    └─────────────────────┘
-                              │                       │
-                              └───────────────────────┘
-                                   Port 6004 → 9000
+  Student ──► Main website ──► Main backend (holds the API key)
+                                     │
+                                     │  POST /submit-c or /submit-python
+                                     │  header: x-api-key
+                                     ▼
+                         ┌───────────────────────────┐
+                         │  nginx  (host port 5000)  │  checks the API key,
+                         │                           │  allows only known URLs,
+                         │                           │  picks the least busy container
+                         └─────────────┬─────────────┘
+                     internal network  │  (no internet access)
+            ┌──────┬──────┬────────────┼────────────┬──────┐
+            ▼      ▼      ▼            ▼            ▼      ▼
+          ┌────┐ ┌────┐ ┌────┐       ┌────┐       ┌────┐ ┌─────┐
+          │ c1 │ │ c2 │ │ c3 │  ...  │ c6 │  ...  │ c9 │ │ c10 │
+          └────┘ └────┘ └────┘       └────┘       └────┘ └─────┘
+            each container: Express (server.js) + gcc + python3
 ```
 
-### Components:
+- **nginx** is the only container with a published port. It rejects requests without the correct `x-api-key` and passes valid ones to one of the 10 compiler containers.
+- **c1 to c10** are identical copies of the `compiler` image. Each one runs `server.js` (Express), which writes the code to a private temp folder, compiles or syntax-checks it, runs it once per test case and compares the output.
+- The compiler containers sit on an **internal-only network**, so student code cannot reach the internet, and nothing outside can reach the containers except through nginx.
 
-1. **Express Server** (`server.js`): Core API server handling code compilation and execution
-2. **nginx Load Balancer**: Distributes requests across multiple container instances
-3. **Docker Containers**: 10 isolated instances for parallel processing
-4. **GCC Compiler**: Integrated C compiler with security restrictions
+The API key is meant to be kept in your **main backend**, not in browser code.
 
-## 📦 Installation & Setup
+## Project files
 
-### Prerequisites
-
-- Docker and Docker Compose
-- Node.js 22.x+ (for local development)
-- GCC compiler (included in Docker image)
-
-### Quick Start with Docker
-
-1. **Clone the repository**:
-```bash
-git clone https://github.com/akashShanmugraj/MyOwnCompiler.git
-cd MyOwnCompiler
+```
+MyOwnCompiler/
+├── server.js                  # Express API: validate, compile, run, compare
+├── Dockerfile                 # compiler image: Node 22 + gcc + python3 + "runner" user
+├── docker-compose.yml         # nginx + c1..c10, networks and resource limits
+├── conf/
+│   └── nginx.conf.template    # nginx config; ${COMPILER_API_KEY} is filled in at startup
+├── .env.example               # copy to .env and set your key
+├── .dockerignore              # keeps .env and other files out of the image
+└── package.json
 ```
 
-2. **Build the Docker image**:
-```bash
-docker build -t compiler:latest .
-```
+## Setup
 
-3. **Start the services**:
-```bash
-docker-compose up -d
-```
+**Requirements:** Docker with Docker Compose. Nothing else needs to be installed; gcc, Python and Node are inside the image.
 
-4. **Verify the service is running**:
-```bash
-curl http://localhost:6004/
-# Expected response: "Server is running -> No issues"
-```
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/thirudev-web/MyOwnCompiler.git
+   cd MyOwnCompiler
+   ```
 
-### Local Development Setup
+2. **Create `.env`**
+   ```bash
+   cp .env.example .env
+   ```
+   Set `COMPILER_API_KEY` to a long random string, for example the output of `openssl rand -hex 32`. Compose refuses to start if the key is missing. `COMPILER_PORT` is optional and defaults to `5000`.
 
-1. **Install dependencies**:
+3. **Build the compiler image**
+   ```bash
+   docker build -t compiler:latest .
+   ```
+
+4. **Start everything**
+   ```bash
+   docker compose up -d
+   ```
+
+5. **Check it is running**
+   ```bash
+   curl http://localhost:5000/compiler
+   # Server is running -> No issues with /compiler
+   ```
+
+After changing `server.js` or the `Dockerfile`, rebuild the image (step 3) and run `docker compose up -d` again. After changing the nginx template or `.env`, run `docker compose up -d` (or `docker compose restart nginx`).
+
+### Running without Docker (development only)
+
 ```bash
 npm install
+node server.js        # http://localhost:3000
 ```
 
-2. **Start the development server**:
-```bash
-node server.js
+This mode is **not sandboxed**: there is no nginx (so no API key check), code runs as your own user, and there are no container limits. Use it only with your own test code.
+
+## API
+
+Base URL: `http://<host>:5000` (or your `COMPILER_PORT`).
+
+| Method | Path | API key | Purpose |
+|---|---|---|---|
+| `POST` | `/submit-c` | required | Compile and run C code against test cases |
+| `POST` | `/submit-python` | required | Run Python code against test cases |
+| `GET` | `/` | no | Health check |
+| `GET` | `/compiler` | no | Health check |
+
+Any other path returns `404`.
+
+### Request
+
+Headers:
+```
+Content-Type: application/json
+x-api-key: <COMPILER_API_KEY>
 ```
 
-The server will be available at `http://localhost:3000`
-
-## 🔌 API Documentation
-
-### Base URL
-- **Production**: `http://localhost:6004` (load-balanced)
-- **Development**: `http://localhost:3000` (single instance)
-
-### Endpoints
-
-#### `GET /`
-Health check endpoint.
-
-**Response:**
-```
-Server is running -> No issues
-```
-
-#### `POST /submit-c`
-Submit C code for compilation and execution with test cases.
-
-**Request Body:**
+Body (same for C and Python):
 ```json
 {
-  "code": "string",        // C source code
-  "testCases": [           // Array of test cases
-    {
-      "input": "string",           // Input to provide to the program
-      "expectedOutput": "string"   // Expected output from the program
-    }
-  ],
-  "submissionid": "string" // Unique identifier for this submission
-}
-```
-
-**Example Request:**
-```json
-{
+  "submissionid": "submission_123",
   "code": "#include <stdio.h>\nint main() {\n    int a, b;\n    scanf(\"%d %d\", &a, &b);\n    printf(\"%d\\n\", a + b);\n    return 0;\n}",
   "testCases": [
-    {
-      "input": "5 3",
-      "expectedOutput": "8"
-    },
-    {
-      "input": "10 15", 
-      "expectedOutput": "25"
-    }
-  ],
-  "submissionid": "submission_123"
-}
-```
-
-**Success Response (200):**
-```json
-{
-  "results": [
-    {
-      "input": "5 3",
-      "expectedOutput": "8", 
-      "actualOutput": "8",
-      "passed": true
-    },
-    {
-      "input": "10 15",
-      "expectedOutput": "25",
-      "actualOutput": "25", 
-      "passed": true
-    }
+    { "input": "5 3",   "expectedOutput": "8" },
+    { "input": "10 15", "expectedOutput": "25" }
   ]
 }
 ```
 
-**Error Responses:**
+| Field | Rules |
+|---|---|
+| `submissionid` | Required. Used only in logs. |
+| `code` | Required string, up to 64 KB. |
+| `testCases` | Required array of 1 to 100 objects. |
+| `testCases[].input` | Optional string, sent to the program's standard input. |
+| `testCases[].expectedOutput` | Required string. |
 
-- **400 Bad Request**: Missing required fields, compilation errors, or malicious code detected
-- **500 Internal Server Error**: Server-side execution errors
+### Response
 
-#### `POST /submit-python`
-Submit C code for compilation and execution with test cases.
-
-**Request Body:**
 ```json
 {
-  "code": "string",        // Python source code
-  "testCases": [           // Array of test cases
-    {
-      "input": "string",           // Input to provide to the program
-      "expectedOutput": "string"   // Expected output from the program
-    }
-  ],
-  "submissionid": "string" // Unique identifier for this submission
+  "results": [
+    { "input": "5 3",   "expectedOutput": "8",  "actualOutput": "8\n",  "passed": true },
+    { "input": "10 15", "expectedOutput": "25", "actualOutput": "25\n", "passed": true }
+  ]
 }
 ```
 
-**Example Request:**
-```json
-{
-  "code": "n = int(input())\nnumbers = []\nfor _ in range(n):\n    numbers.append(int(input()))\nprint(sum(numbers))",
-  "testCases": [
-    {
-      "input": "3\n1\n2\n3",
-      "expectedOutput": "6"
-    },
-    {
-      "input": "4\n10\n20\n30\n40",
-      "expectedOutput": "100"
-    }
-  ],
-  "submissionid": "sum-array-py-001"
-}
-```
+How outputs are compared:
+- **C:** line endings are normalized and leading/trailing whitespace is trimmed.
+- **Python:** all whitespace is ignored.
 
-**Success Response (200):**
-```json
-{
-    "results": [
-        {
-            "input": "3\n1\n2\n3",
-            "expectedOutput": "6",
-            "actualOutput": "6\n",
-            "passed": true
-        },
-        {
-            "input": "4\n10\n20\n30\n40",
-            "expectedOutput": "100",
-            "actualOutput": "100\n",
-            "passed": true
-        }
-    ]
-}
-```
+If a test case crashes, times out or prints too much, `passed` is `false` and `actualOutput` holds the reason, for example `Execution timeout: Program took too long to execute (possible infinite loop)`.
 
-**Error Responses:**
+### Errors
 
-- **400 Bad Request**: Missing required fields, compilation errors, or malicious code detected
-- **500 Internal Server Error**: Server-side execution errors
+| Status | Sent by | Meaning |
+|---|---|---|
+| `400` | server | Invalid body, blocked C function, compilation error or Python syntax error. Body has `error` and sometimes `details` (the compiler message). |
+| `401` | nginx | Missing or wrong `x-api-key`. |
+| `404` | nginx | Unknown path. |
+| `413` | nginx | Request body over 10 MB. |
+| `500` | server | Unexpected server error. |
+| `502` / `504` | nginx | No container answered, or one took longer than 120 seconds. |
 
+### Example
 
-## 🔒 Security Features
-
-The service implements multiple security layers to prevent malicious code execution:
-
-### Dangerous Function Detection
-The following functions are blocked to prevent system exploitation:
-- File operations: `fopen`, `freopen`, `remove`, `rename`, `tmpfile`, etc.
-- System calls: `system`, `exec`, `fork`, `popen`, etc.
-- Memory operations: `memcpy`, `memmove` (in unsafe contexts)
-- Network operations: `socket`, `connect`, `listen`, `accept`, etc.
-- Process control: `kill`, `signal`, `raise`, etc.
-
-### Execution Limits
-- **Compilation timeout**: 10 seconds maximum
-- **Execution timeout**: 5 seconds per test case
-- **Process isolation**: Each execution runs in a separate process
-- **Automatic cleanup**: Temporary files are safely deleted after execution
-
-### Input Validation
-- All request fields are validated for presence and type
-- Code content is scanned for dangerous patterns
-- Submission IDs are used to prevent file conflicts
-
-## 🐳 Docker Deployment
-
-### Container Architecture
-The deployment uses:
-- **1 nginx container**: Load balancer and reverse proxy
-- **10 Node.js containers**: Application servers (c1-c10)
-- **Custom network**: Isolated bridge network for inter-container communication
-
-### Configuration Files
-- `Dockerfile`: Node.js application container definition
-- `docker-compose.yml`: Multi-container orchestration
-- `conf/nginx.conf`: Load balancer configuration
-
-### Scaling
-To modify the number of application containers:
-
-1. Edit `docker-compose.yml` to add/remove service definitions
-2. Update `conf/nginx.conf` upstream configuration
-3. Rebuild and restart: `docker-compose up -d --build`
-
-## 🛠️ Development Workflow
-
-### Code Structure
-```
-MyOwnCompiler/
-├── server.js              # Main application server
-├── package.json           # Node.js dependencies
-├── Dockerfile             # Container definition
-├── docker-compose.yml     # Multi-container setup
-├── conf/
-│   └── nginx.conf         # Load balancer config
-└── README.md             # This file
-```
-
-### Key Functions
-- `safeDeleteFile()`: Robust file cleanup with retry logic
-- `POST /submit` handler: Main code processing pipeline
-- Security validation: Pattern matching for dangerous functions
-
-### Testing Your Changes
-
-1. **Test locally**:
 ```bash
-node server.js
-curl -X POST http://localhost:3000/submit \
+curl -X POST http://localhost:5000/submit-python \
   -H "Content-Type: application/json" \
-  -d '{"code":"#include <stdio.h>\nint main(){printf(\"Hello World\");return 0;}", "testCases":[{"input":"", "expectedOutput":"Hello World"}], "submissionid":"test1"}'
+  -H "x-api-key: $COMPILER_API_KEY" \
+  -d '{"submissionid":"t1","code":"print(int(input())*2)","testCases":[{"input":"21","expectedOutput":"42"}]}'
 ```
 
-2. **Test with Docker**:
-```bash
-docker build -t compiler:latest .
-docker-compose up -d
-curl http://localhost:6004/
-```
+## Limits
 
-## 🤝 Contributing
+| Limit | Value |
+|---|---|
+| Compile / syntax-check time | 10 s |
+| Run time per test case | 5 s wall clock, 6 s CPU |
+| Output per run | 64 KB |
+| Memory per program | 512 MB |
+| Processes per program | 64 |
+| Largest file a program may write | 1 MB |
+| Per container | 1 CPU, 768 MB RAM, 256 processes, 64 MB `/tmp` |
 
-### Guidelines
-1. **Security First**: Any changes must maintain or improve security measures
-2. **Test Coverage**: Test both successful and error scenarios
-3. **Documentation**: Update README for any API or architecture changes
-4. **Code Style**: Follow existing patterns and include proper error handling
+C is compiled with `gcc -O2 -std=gnu11 ... -lm`.
 
-### Common Development Tasks
+## Security
 
-**Adding new security restrictions**:
-- Update the `dangerousFunctions` array in `server.js`
-- Test with various malicious code samples
+Even when only your main backend can call this API, the student's code is passed through unchanged and runs here, so the containers are built to contain hostile code:
 
-**Modifying compilation options**:
-- Update the `gccCmd` variable in the `/submit` endpoint
-- Ensure timeout and error handling remain intact
+- **API key and allow-list in nginx:** only the main backend can submit, and only the four paths above are reachable.
+- **No shell:** programs are started directly, never through a shell command, and `submissionid` is never used in file names or commands.
+- **Unprivileged user:** student programs run as the `runner` user, not root.
+- **Per-program limits** (`prlimit`) on CPU time, memory, processes and file size, plus timeouts and an output cap. The whole process group is killed after each run, and a background sweep kills any leftover `runner` processes older than 30 seconds.
+- **Private folder per submission:** each job gets its own temp folder, deleted afterwards; students cannot list each other's folders.
+- **Locked-down containers:** read-only filesystem except a small in-memory `/tmp`, almost all Linux capabilities dropped, `no-new-privileges`, CPU/memory/process limits, and automatic restart.
+- **No internet:** the compiler containers are on an internal Docker network.
+- **C function blocklist:** calls such as `system(`, `fork(`, `fopen(` and `socket(` are rejected before compiling. This is only a first filter and is easy to get around; the sandbox above is the real protection. Python has no blocklist and relies entirely on the sandbox.
 
-**Scaling adjustments**:
-- Modify container count in `docker-compose.yml`
-- Update nginx upstream configuration accordingly
+## Scaling
 
-### Reporting Issues
-When reporting bugs or requesting features:
-- Include code samples that demonstrate the issue
-- Specify whether the problem occurs in local or Docker environments
-- Provide logs from both the Node.js server and nginx (if applicable)
+Each container runs one CPU's worth of work, so 10 containers handle about 10 submissions at the same time. To change the number:
 
-## 📝 License
+1. Add or remove `cN` lines in `docker-compose.yml`, and update nginx's `depends_on` list.
+2. Add or remove the matching `server cN:3000;` lines in `conf/nginx.conf.template`.
+3. Run `docker compose up -d`.
 
-This project is available for educational and non-commercial use. Please respect the security measures implemented and use responsibly.
+## Troubleshooting
 
-## 🔧 Troubleshooting
+| Problem | What to check |
+|---|---|
+| `docker compose up` says `Set COMPILER_API_KEY in .env` | Create `.env` from `.env.example` and set the key. |
+| `401` on every submission | The `x-api-key` header must exactly match `COMPILER_API_KEY` in `.env`. Restart nginx after changing the key. |
+| `502 Bad Gateway` | Compiler containers are not running: `docker compose ps`, then `docker compose logs c1`. |
+| `pull access denied for compiler` | Build the image first: `docker build -t compiler:latest .` |
+| Code changes not showing up | Rebuild the image, then `docker compose up -d`. |
+| Logs | `docker compose logs -f nginx` or `docker compose logs -f c1` |
 
-### Common Issues
+## License
 
-**"Server is not responding"**:
-- Check if Docker containers are running: `docker ps`
-- Verify port availability: `netstat -tulpn | grep 6004`
-
-**"Compilation timeout"**:
-- Code may have infinite loops or complex operations
-- Check the 10-second compilation limit is appropriate for your use case
-
-**"Malicious function detected"**:
-- Review the security section for blocked functions
-- Ensure your C code doesn't use restricted system calls
-
-**File cleanup errors (Windows)**:
-- The service includes retry logic for file deletion issues
-- Warnings about cleanup failures are logged but don't crash the service
+Available for educational and non-commercial use.
